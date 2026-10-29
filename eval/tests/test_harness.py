@@ -189,6 +189,16 @@ def test_report_groups_and_denominators(evaluator, dialect):
     assert summary["language/dialect"][f"uz/{dialect}"]["n"] == 2
 
 
+def test_parallel_prefetch_matches_sequential(dialect, backend):
+    from eval.harness import Evaluator
+    records = [rec(dialect, GOOD, [GOOD, WRONG, "SELEC x"], id=str(i)) for i in range(20)]
+    records += [rec(dialect, "SELECT * FROM nope", GOOD, id="g"), rec(dialect, GOOD, SLEEPS, id="t")]
+    sequential = [Evaluator({dialect: backend}).score(r) for r in records]
+    parallel_ev = Evaluator({dialect: backend})
+    parallel_ev.prefetch(records, workers=6)
+    assert [parallel_ev.score(r) for r in records] == sequential
+
+
 def test_sqlite_dir_may_be_relative(sqlite_dir, monkeypatch):
     from eval.backends import SQLiteBackend
     monkeypatch.chdir(sqlite_dir.parent)

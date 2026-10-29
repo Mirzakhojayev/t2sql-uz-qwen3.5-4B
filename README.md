@@ -42,8 +42,8 @@ pip install -r requirements-eval.txt
 ### 3. Eval harness
 
 ```powershell
-pytest                                   # 73 tests, each run on SQLite and PostgreSQL
-python -m eval.harness preds.jsonl --sqlite-dir data/sqlite --out report.json
+pytest                                   # each test runs on SQLite and PostgreSQL
+python -m eval.harness preds.jsonl --sqlite-dir data/sqlite --workers 8 --out report.json
 ```
 
 Input, one json object per line: `id, language, dialect (sqlite|postgres), slice, db_id, gold_sql`

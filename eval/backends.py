@@ -4,6 +4,7 @@ Query failures (syntax error, timeout, ...) come back as ExecResult(ok=False).
 Setup problems (missing database file, cannot connect) raise, so they are never scored as wrong answers.
 """
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,37 @@ class ExecResult:
     rows: list[tuple] | None = None
     error: str | None = None
     timed_out: bool = False
+    elapsed: float = 0.0  # seconds, filled in by the harness
+
+
+class _ThreadLocalConns:
+    """One connection per (thread, database): driver connections are not shared between threads."""
+
+    def __init__(self):
+        self._local = threading.local()
+        self._all: list = []
+        self._lock = threading.Lock()
+
+    def get(self, db_id, connect):
+        conns = getattr(self._local, "conns", None)
+        if conns is None:
+            conns = self._local.conns = {}
+        conn = conns.get(db_id)
+        if conn is None or getattr(conn, "closed", False):
+            conn = conns[db_id] = connect()
+            with self._lock:
+                self._all.append(conn)
+        return conn
+
+    def close_all(self):
+        with self._lock:
+            for conn in self._all:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._all.clear()
+        self._local = threading.local()
 
 
 def _first_line(exc: Exception) -> str:
@@ -34,7 +66,7 @@ class SQLiteBackend:
     def __init__(self, db_dir: Path, timeout_s: float = 10.0):
         self.db_dir = Path(db_dir).resolve()  # as_uri() needs an absolute path
         self.timeout_s = timeout_s
-        self._conns: dict[str, sqlite3.Connection] = {}
+        self._conns = _ThreadLocalConns()
 
     def _path(self, db_id: str) -> Path:
         for candidate in (self.db_dir / f"{db_id}.sqlite", self.db_dir / db_id / f"{db_id}.sqlite"):
@@ -42,14 +74,15 @@ class SQLiteBackend:
                 return candidate
         raise FileNotFoundError(f"SQLite database for db_id={db_id!r} not found under {self.db_dir}")
 
-    def _conn(self, db_id: str) -> sqlite3.Connection:
-        conn = self._conns.get(db_id)
-        if conn is None:
-            # mode=ro: the file cannot be modified, whatever the SQL says
-            conn = sqlite3.connect(f"{self._path(db_id).as_uri()}?mode=ro", uri=True)
-            conn.text_factory = lambda b: b.decode("utf-8", errors="replace")
-            self._conns[db_id] = conn
+    def _connect(self, db_id: str) -> sqlite3.Connection:
+        # mode=ro: the file cannot be modified, whatever the SQL says.
+        # check_same_thread=False only so close() may run on another thread; each connection is used by one thread.
+        conn = sqlite3.connect(f"{self._path(db_id).as_uri()}?mode=ro", uri=True, check_same_thread=False)
+        conn.text_factory = lambda b: b.decode("utf-8", errors="replace")
         return conn
+
+    def _conn(self, db_id: str) -> sqlite3.Connection:
+        return self._conns.get(db_id, lambda: self._connect(db_id))
 
     def execute(self, db_id: str, sql: str) -> ExecResult:
         conn = self._conn(db_id)
@@ -68,9 +101,7 @@ class SQLiteBackend:
         return ExecResult(ok=True, rows=[tuple(r) for r in rows])
 
     def close(self) -> None:
-        for conn in self._conns.values():
-            conn.close()
-        self._conns.clear()
+        self._conns.close_all()
 
 
 class PostgresBackend:
@@ -79,22 +110,22 @@ class PostgresBackend:
     def __init__(self, cfg: PgConfig, timeout_s: float = 10.0):
         self.cfg = cfg
         self.timeout_s = timeout_s
-        self._conns: dict[str, psycopg.Connection] = {}
+        self._conns = _ThreadLocalConns()
+
+    def _connect(self, db_id: str) -> psycopg.Connection:
+        conn = psycopg.connect(
+            host=self.cfg.host,
+            port=self.cfg.port,
+            dbname=db_id,
+            user=self.cfg.ro_user,
+            password=self.cfg.ro_password,
+            options=f"-c statement_timeout={int(self.timeout_s * 1000)} -c default_transaction_read_only=on",
+        )
+        conn.read_only = True
+        return conn
 
     def _conn(self, db_id: str) -> psycopg.Connection:
-        conn = self._conns.get(db_id)
-        if conn is None or conn.closed:
-            conn = psycopg.connect(
-                host=self.cfg.host,
-                port=self.cfg.port,
-                dbname=db_id,
-                user=self.cfg.ro_user,
-                password=self.cfg.ro_password,
-                options=f"-c statement_timeout={int(self.timeout_s * 1000)} -c default_transaction_read_only=on",
-            )
-            conn.read_only = True
-            self._conns[db_id] = conn
-        return conn
+        return self._conns.get(db_id, lambda: self._connect(db_id))
 
     def execute(self, db_id: str, sql: str) -> ExecResult:
         conn = self._conn(db_id)
@@ -119,6 +150,4 @@ class PostgresBackend:
         return ExecResult(ok=True, rows=[tuple(r) for r in rows])
 
     def close(self) -> None:
-        for conn in self._conns.values():
-            conn.close()
-        self._conns.clear()
+        self._conns.close_all()

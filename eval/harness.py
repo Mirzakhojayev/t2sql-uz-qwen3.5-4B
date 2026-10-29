@@ -15,7 +15,9 @@ Usage: python -m eval.harness preds.jsonl --sqlite-dir data/sqlite --out report.
 import argparse
 import json
 import sys
+import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -71,8 +73,26 @@ class Evaluator:
     def run(self, dialect: str, db_id: str, sql: str) -> ExecResult:
         key = (dialect, db_id, sql)
         if key not in self._cache:
-            self._cache[key] = self.backends[dialect].execute(db_id, sql)
+            start = time.monotonic()
+            res = self.backends[dialect].execute(db_id, sql)
+            res.elapsed = time.monotonic() - start
+            self._cache[key] = res
         return self._cache[key]
+
+    def prefetch(self, records: list[dict], workers: int) -> None:
+        """Execute every distinct (dialect, db, sql) once, in parallel; score() then reads the cache."""
+        keys = {}
+        for rec in records:
+            dialect = DIALECT_ALIASES.get(rec["dialect"], rec["dialect"])
+            for sql in [rec["gold_sql"], *_preds(rec)]:
+                keys[(dialect, rec["db_id"], sql)] = None
+        todo = [k for k in keys if k not in self._cache]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda k: self.run(*k), todo))  # list() re-raises setup errors, e.g. missing database
+
+    def slowest(self, n: int = 5) -> list[tuple[float, str, str, str]]:
+        top = sorted(self._cache.items(), key=lambda kv: kv[1].elapsed, reverse=True)[:n]
+        return [(res.elapsed, d, db, " ".join(sql.split())[:90]) for (d, db, sql), res in top]
 
     def score(self, rec: dict) -> Scored:
         dialect = DIALECT_ALIASES.get(rec["dialect"], rec["dialect"])
@@ -156,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("predictions", type=Path)
     ap.add_argument("--sqlite-dir", type=Path, default=Path("data/sqlite"))
     ap.add_argument("--timeout", type=float, default=10.0, help="seconds per query")
+    ap.add_argument("--workers", type=int, default=4, help="queries executed in parallel")
     ap.add_argument("--out", type=Path, help="write the full report (summary + per-record) as json")
     args = ap.parse_args(argv)
 
@@ -165,9 +186,15 @@ def main(argv: list[str] | None = None) -> int:
         backends["postgres"] = PostgresBackend(pg_config(), args.timeout)
 
     ev = Evaluator(backends)
+    started = time.monotonic()
+    ev.prefetch(records, args.workers)
     scored = [ev.score(r) for r in records]
     summary = summarize(scored)
     print(format_report(summary))
+    print(f"\nexecuted {len(ev._cache)} distinct queries in {time.monotonic() - started:.1f}s with {args.workers} workers")
+    print("slowest:")
+    for secs, dialect, db_id, sql in ev.slowest():
+        print(f"  {secs:6.1f}s  {dialect:8} {db_id:24} {sql}")
     if args.out:
         args.out.write_text(
             json.dumps({"summary": summary, "records": [asdict(s) for s in scored]}, ensure_ascii=False, indent=1),
