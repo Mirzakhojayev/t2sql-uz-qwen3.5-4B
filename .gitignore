@@ -1,0 +1,25 @@
+# secrets
+.env
+*.key
+
+# data and model artifacts (large; keep out of git)
+data/*
+!data/.gitkeep
+*.sqlite
+*.db
+*.gguf
+*.safetensors
+outputs/
+runs/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# modal / editor
+.modal/
+.vscode/
+.idea/
