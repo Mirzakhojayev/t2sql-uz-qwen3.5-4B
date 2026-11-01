@@ -27,6 +27,14 @@ class PgConfig:
     admin_password: str
 
 
+def secret(name: str) -> str:
+    """An API key or password from the environment or docker/.env. Raises if missing; never prints it."""
+    value = {**_read_dotenv(ROOT / "docker" / ".env"), **os.environ}.get(name, "")
+    if not value:
+        raise RuntimeError(f"{name} is not set (environment variable or docker/.env)")
+    return value
+
+
 def pg_config() -> PgConfig:
     env = {**_read_dotenv(ROOT / "docker" / ".env"), **os.environ}
     return PgConfig(

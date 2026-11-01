@@ -126,6 +126,13 @@ def test_percent_in_like_is_not_a_placeholder(evaluator, dialect):
     assert evaluator.run(dialect, testdb.DB_ID, q).rows == [("Bobur",)]
 
 
+def test_empty_prediction_is_an_error_not_an_empty_result(evaluator, dialect):
+    empty_gold = "SELECT name FROM employees WHERE salary > 99999"  # gold result is empty
+    for pred in ("", "   ", None):
+        s = evaluator.score(rec(dialect, empty_gold, [pred]))
+        assert s.pred_status == ["error"] and not s.acc
+
+
 def test_failing_gold_is_excluded(evaluator, dialect):
     s = evaluator.score(rec(dialect, "SELECT * FROM no_such_table", GOOD))
     assert not s.gold_ok and s.gold_error and not s.acc

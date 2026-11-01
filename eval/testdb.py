@@ -51,7 +51,7 @@ def build_sqlite(path: Path) -> None:
 
 def build_postgres(cfg: PgConfig, db_name: str = DB_ID) -> None:
     """(Re)create the database with the admin user; the harness reads it as the read-only user."""
-    admin = dict(host=cfg.host, port=cfg.port, user=cfg.admin_user, password=cfg.admin_password)
+    admin = dict(host=cfg.host, port=cfg.port, user=cfg.admin_user, password=cfg.admin_password, connect_timeout=10)
     with psycopg.connect(dbname="postgres", autocommit=True, **admin) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{db_name}"')

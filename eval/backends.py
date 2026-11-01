@@ -119,6 +119,7 @@ class PostgresBackend:
             dbname=db_id,
             user=self.cfg.ro_user,
             password=self.cfg.ro_password,
+            connect_timeout=10,  # fail fast when the server is down instead of hanging for minutes
             options=f"-c statement_timeout={int(self.timeout_s * 1000)} -c default_transaction_read_only=on",
         )
         conn.read_only = True

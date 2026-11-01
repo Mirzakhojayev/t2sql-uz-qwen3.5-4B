@@ -85,7 +85,8 @@ class Evaluator:
         for rec in records:
             dialect = DIALECT_ALIASES.get(rec["dialect"], rec["dialect"])
             for sql in [rec["gold_sql"], *_preds(rec)]:
-                keys[(dialect, rec["db_id"], sql)] = None
+                if sql and sql.strip():
+                    keys[(dialect, rec["db_id"], sql)] = None
         todo = [k for k in keys if k not in self._cache]
         with ThreadPoolExecutor(max_workers=workers) as pool:
             list(pool.map(lambda k: self.run(*k), todo))  # list() re-raises setup errors, e.g. missing database
@@ -108,6 +109,10 @@ class Evaluator:
         gold_sig = signature(normalize_rows(gold.rows), ordered)
         sigs, status = [], []
         for sql in _preds(rec):
+            if not sql or not sql.strip():  # nothing extracted; SQLite would run "" as an empty, error-free result
+                sigs.append(None)
+                status.append("error")
+                continue
             res = self.run(dialect, rec["db_id"], sql)
             if res.ok:
                 sigs.append(signature(normalize_rows(res.rows), ordered))

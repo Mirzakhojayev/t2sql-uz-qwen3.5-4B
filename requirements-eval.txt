@@ -1,3 +1,5 @@
 psycopg[binary]>=3.2
 sqlglot>=25
 pytest>=8
+openai>=1.50        # DeepSeek's API is OpenAI-compatible
+tokenizers>=0.20
