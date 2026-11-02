@@ -129,9 +129,13 @@ class PostgresBackend:
         return self._conns.get(db_id, lambda: self._connect(db_id))
 
     def execute(self, db_id: str, sql: str) -> ExecResult:
-        conn = self._conn(db_id)
+        # "database/schema" addresses one schema of a shared database (how thousands of small databases are stored)
+        dbname, _, schema = db_id.partition("/")
+        conn = self._conn(dbname)
         try:
             with conn.cursor() as cur:
+                if schema:
+                    cur.execute(f'SET LOCAL search_path TO "{schema}"')
                 cur.execute(sql)
                 if cur.description is None:
                     return ExecResult(ok=False, error="statement returned no result set")
