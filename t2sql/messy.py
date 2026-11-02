@@ -42,7 +42,8 @@ SHARE = 0.25
 NAMES_SYSTEM = (
     "You rename database identifiers the way developers in Uzbekistan name things. For each English identifier "
     "give three forms: uz = Uzbek in Latin letters; ru = Russian in Cyrillic; translit = the Russian word written in "
-    "Latin letters. Use lower case and underscores, keep names short, and do not use apostrophes or spaces. "
+    "Latin letters. The ru form must use only Cyrillic letters, even for technical words. "
+    "Use lower case and underscores, keep names short, and do not use apostrophes or spaces. "
     "Keep common technical suffixes meaningful (user_id -> foydalanuvchi_id). Reply with only one JSON object: "
     '{"identifier": {"uz": "...", "ru": "...", "translit": "..."}, ...} containing every identifier.'
 )
@@ -60,6 +61,22 @@ def sanitize(name: str) -> str:
     """Identifier-safe: letters of any script, digits and underscores only."""
     name = re.sub(r"['‘’ʻʼ`\"]", "", name.strip().lower())
     name = re.sub(r"[^\w]+", "_", name, flags=re.UNICODE).strip("_")
+    return name
+
+
+_TO_CYRILLIC = [
+    ("shch", "щ"), ("sh", "ш"), ("ch", "ч"), ("ya", "я"), ("yu", "ю"), ("yo", "ё"), ("zh", "ж"), ("kh", "х"),
+    ("ts", "ц"), ("ye", "е"), ("a", "а"), ("b", "б"), ("c", "к"), ("d", "д"), ("e", "е"), ("f", "ф"), ("g", "г"),
+    ("h", "х"), ("i", "и"), ("j", "дж"), ("k", "к"), ("l", "л"), ("m", "м"), ("n", "н"), ("o", "о"), ("p", "п"),
+    ("q", "к"), ("r", "р"), ("s", "с"), ("t", "т"), ("u", "у"), ("v", "в"), ("w", "в"), ("x", "кс"), ("y", "й"),
+    ("z", "з"),
+]
+
+
+def to_cyrillic(name: str) -> str:
+    """Latin letters to Cyrillic, longest letter groups first: pokazaniya -> показания, email -> емаил."""
+    for latin, cyrillic in _TO_CYRILLIC:
+        name = name.replace(latin, cyrillic)
     return name
 
 
@@ -90,6 +107,11 @@ def build_map(identifiers: list[str], forms: dict[str, dict], style: str, seed: 
             if not entry.get(key):
                 raise ValueError(f"no {key} form for {original!r}")
             candidate = sanitize(entry[key])
+            has_cyrillic = bool(re.search(r"[а-яёўқғҳ]", candidate))
+            if chosen == "cyrillic" and not has_cyrillic:  # the model sometimes answers in Latin: pokazaniya, email
+                candidate = to_cyrillic(candidate)
+            elif chosen != "cyrillic" and has_cyrillic:
+                raise ValueError(f"wrong script in {key} form for {original!r}: {candidate!r}")
         if not candidate:
             raise ValueError(f"empty name for {original!r}")
         name, k = candidate, 2

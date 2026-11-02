@@ -8,7 +8,8 @@ from eval.config import pg_config
 from t2sql import convert
 from t2sql.convert import load_database
 from t2sql.messy import (
-    abbreviate, build_map, messy_schema_name, parse_forms, rename_hint, rename_sql, sanitize, style_of, verify,
+    abbreviate, build_map, messy_schema_name, parse_forms, rename_hint, rename_sql, sanitize, style_of, to_cyrillic,
+    verify,
 )
 from t2sql.pg_prompts import ddl_is_valid, schema_ddl
 
@@ -42,6 +43,18 @@ def test_build_map_styles():
 def test_build_map_never_merges_two_columns():
     forms = {"a": {"uz": "nom"}, "b": {"uz": "Nom"}}
     assert build_map(["a", "b"], forms, "uz_latin", "s") == {"a": "nom", "b": "nom_2"}
+
+
+def test_latin_in_the_cyrillic_field_is_converted():
+    # seen in real output: 19% of the Russian names came back in Latin
+    assert build_map(["a"], {"a": {"ru": "pokazaniya_datchika"}}, "cyrillic", "s") == {"a": "показания_датчика"}
+    assert to_cyrillic("shchet") == "щет" and to_cyrillic("email") == "емаил"
+
+
+def test_build_map_rejects_cyrillic_in_latin_styles():
+    with pytest.raises(ValueError):
+        build_map(["a"], {"a": {"uz": "ходим"}}, "uz_latin", "s")
+    assert build_map(["a"], {"a": {"ru": "показания"}}, "cyrillic", "s") == {"a": "показания"}
 
 
 def test_build_map_missing_translation_raises():

@@ -32,7 +32,7 @@ def jobs_for(questions: list[dict]) -> list[dict]:
     return [{
         "id": f"{lang}-{q['question_id']}", "question_id": q["question_id"], "language": lang,
         "db_id": q["db_id"], "difficulty": q["difficulty"], "english": q["question"],
-        "source": "bird_minidev", "license": "CC BY-SA 4.0", "split": "eval",
+        "source": q["source"], "license": q["license"], "split": q["split"],
         "messages": [{"role": "system", "content": SYSTEM.format(language=desc)},
                      {"role": "user", "content": q["question"]}],
     } for q in questions for lang, desc in LANGUAGES.items()]
@@ -88,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
 
     questions = [json.loads(line) for line in open(BIRD_FILE, encoding="utf-8")]
     picked = random.Random(args.seed).sample(questions, args.n)
+    for q in picked:
+        q.update(source="bird_minidev", license="CC BY-SA 4.0", split="eval")
     out = args.out_dir / "translations.jsonl"
     teacher.run(jobs_for(picked), out, thinking=True, effort="high", workers=8, max_usd=args.max_usd)
     records = [json.loads(line) for line in open(out, encoding="utf-8")]
