@@ -8,6 +8,7 @@ from eval.backends import PostgresBackend
 from eval.config import pg_config
 from t2sql import convert, synsql
 from t2sql.convert import check_question, load_database, pg_type, schema_name, to_postgres
+from t2sql.pg_prompts import ddl_is_valid, schema_ddl
 
 DB = "conv_test"
 
@@ -94,6 +95,19 @@ def test_readonly_user_reads_the_schema(pg_db):
     res = backend.execute(f"{convert.PG_DATABASE}/{schema_name(DB)}", "SELECT COUNT(*) FROM emp")
     assert res.ok and res.rows == [(3,)]
     assert not backend.execute(f"{convert.PG_DATABASE}/{schema_name(DB)}", "DELETE FROM emp").ok
+
+
+def test_prompt_ddl_from_a_loaded_schema(pg_db):
+    cfg = pg_config()
+    with psycopg.connect(host=cfg.host, port=cfg.port, dbname=convert.PG_DATABASE, user=cfg.ro_user,
+                         password=cfg.ro_password, connect_timeout=10) as conn:
+        ddl = schema_ddl(conn, DB)
+    assert "CREATE TABLE dept (" in ddl and "CREATE TABLE emp (" in ddl
+    assert "id BIGINT PRIMARY KEY" in ddl and "pay DOUBLE PRECISION" in ddl
+    assert "code TEXT" in ddl  # SQLite held text in this INTEGER column
+    assert "FOREIGN KEY (dept_id) REFERENCES dept(id)" in ddl
+    assert ddl_is_valid(ddl)
+    assert not ddl_is_valid("CREATE TABLE (")
 
 
 def test_same_result_is_kept(pg_db):

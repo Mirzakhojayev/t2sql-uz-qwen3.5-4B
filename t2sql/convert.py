@@ -94,8 +94,10 @@ def _clean(v, col_type: str):
     return v
 
 
-def load_database(conn: psycopg.Connection, sqlite_path: Path, schema: str) -> dict:
-    """Copy one SQLite file into a new schema, in one transaction. conn must be autocommit (admin user)."""
+def load_database(conn: psycopg.Connection, sqlite_path: Path, schema: str, rename: dict[str, str] | None = None) -> dict:
+    """Copy one SQLite file into a new schema, in one transaction. conn must be autocommit (admin user).
+    rename: optional {lower-case original name: new name} for tables and columns (messy schemas)."""
+    new = (lambda name: (rename or {}).get(name.lower(), name))
     src = sqlite3.connect(f"{Path(sqlite_path).resolve().as_uri()}?mode=ro", uri=True)
     src.text_factory = lambda b: b.decode("utf-8", errors="replace")
     report = {"tables": 0, "rows": 0, "primary_keys": 0, "foreign_keys": 0, "foreign_keys_skipped": 0}
@@ -116,11 +118,11 @@ def load_database(conn: psycopg.Connection, sqlite_path: Path, schema: str) -> d
                 positions = [next(i for i, c in enumerate(info) if c[1] == name) for name in pk]
                 keys = [tuple(r[i] for i in positions) for r in rows]
                 key_ok = pk and len(set(keys)) == len(keys) and not any(v is None for k in keys for v in k)
-                cols = [f"{_q(c[1])} {t}" for c, t in zip(info, types)]
+                cols = [f"{_q(new(c[1]))} {t}" for c, t in zip(info, types)]
                 if key_ok:
-                    cols.append(f"PRIMARY KEY ({', '.join(_q(n) for n in pk)})")
+                    cols.append(f"PRIMARY KEY ({', '.join(_q(new(n)) for n in pk)})")
                     report["primary_keys"] += 1
-                target = f"{_q(schema)}.{_q(table)}"
+                target = f"{_q(schema)}.{_q(new(table))}"
                 conn.execute(f"CREATE TABLE {target} ({', '.join(cols)})")
                 if rows:
                     with conn.cursor().copy(f"COPY {target} FROM STDIN") as copy:
@@ -137,8 +139,8 @@ def load_database(conn: psycopg.Connection, sqlite_path: Path, schema: str) -> d
                     try:
                         with conn.transaction():
                             conn.execute(
-                                f"ALTER TABLE {_q(schema)}.{_q(table)} ADD FOREIGN KEY ({_q(from_col)}) "
-                                f"REFERENCES {_q(schema)}.{_q(ref_table)} ({_q(to_col)}) NOT VALID")
+                                f"ALTER TABLE {_q(schema)}.{_q(new(table))} ADD FOREIGN KEY ({_q(new(from_col))}) "
+                                f"REFERENCES {_q(schema)}.{_q(new(ref_table))} ({_q(new(to_col))}) NOT VALID")
                         report["foreign_keys"] += 1
                     except (psycopg.Error, TypeError):
                         report["foreign_keys_skipped"] += 1

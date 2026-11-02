@@ -1,5 +1,5 @@
 """Read a PostgreSQL database into the same Table/Column objects as read_sqlite_schema, so one formatter
-(schema_to_ddl) serves both dialects. Only the `public` schema is read."""
+(schema_to_ddl) serves both dialects. Only the current schema is read (`public` unless search_path says otherwise)."""
 import psycopg
 
 from .prompt import N_EXAMPLES, Column, ForeignKey, Table, quote_ident
@@ -9,7 +9,7 @@ _COLUMNS = """
     FROM pg_attribute a
     JOIN pg_class cl ON cl.oid = a.attrelid
     JOIN pg_namespace n ON n.oid = cl.relnamespace
-    WHERE n.nspname = 'public' AND cl.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+    WHERE n.nspname = current_schema() AND cl.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
     ORDER BY cl.relname, a.attnum
 """
 
@@ -34,7 +34,7 @@ _PRIMARY_KEYS = """
     JOIN pg_class cl ON cl.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = cl.relnamespace
     JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY (con.conkey)
-    WHERE con.contype = 'p' AND n.nspname = 'public'
+    WHERE con.contype = 'p' AND n.nspname = current_schema()
     ORDER BY cl.relname, pos
 """
 
@@ -47,7 +47,7 @@ _FOREIGN_KEYS = """
     CROSS JOIN LATERAL unnest(con.conkey, con.confkey) AS k(col, refcol)
     JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.col
     JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.refcol
-    WHERE con.contype = 'f' AND n.nspname = 'public'
+    WHERE con.contype = 'f' AND n.nspname = current_schema()
 """
 
 
