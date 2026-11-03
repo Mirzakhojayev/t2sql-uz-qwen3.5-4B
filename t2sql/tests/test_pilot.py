@@ -1,6 +1,13 @@
 import random
+from collections import Counter
 
-from t2sql.pilot import CALLS_PER_LEVEL, MESSY_SHARE_OF_PG, pick_jobs
+import pytest
+
+from t2sql.pilot import (
+    CALLS_PER_LEVEL, LANGUAGE_SHARES, MESSY_SHARE_OF_PG, assign_languages, clean_trace, drop_repeats, make_examples,
+    pick_balanced, pick_jobs, split_trace, swap_question,
+)
+from t2sql.prompt import extract_sql
 
 
 def rows(prefix, per_level):
@@ -40,3 +47,118 @@ def test_no_question_is_picked_twice():
     picked = pick_jobs(rows("plain", 3000), rows("messy", 3000), set(), random.Random(0))
     ids = [r["id"] for r in picked]
     assert len(ids) == len(set(ids))
+
+
+TRACE = "Steps first.\n\n```sql\nSELECT 1;\n```\n\nThen a better one:\n\n```sql\nSELECT 2;\n```\n\n### Explanation\nIt selects 2."
+
+
+def test_clean_trace_ends_at_the_final_sql_block():
+    cleaned = clean_trace(TRACE)
+    assert cleaned.endswith("SELECT 2;\n```")
+    assert "Explanation" not in cleaned
+    assert extract_sql(cleaned) == extract_sql(TRACE)
+
+
+def test_clean_trace_drops_reference_mentions_and_traces_without_sql():
+    assert clean_trace("The Reference Solution joins too much.\n\n```sql\nSELECT 1;\n```") is None
+    assert clean_trace("the reference  query is wrong\n\n```sql\nSELECT 1;\n```") is None
+    assert clean_trace("no query here") is None
+    assert clean_trace("```sql\nSELECT 1;") is None  # never closed
+
+
+def test_pick_balanced_is_equal_when_supply_allows():
+    picked = pick_balanced(rows("x", 100), 200, random.Random(0))
+    assert all(count(picked, lvl) == 50 for lvl in CALLS_PER_LEVEL)
+
+
+def test_pick_balanced_gives_a_short_levels_share_to_the_others():
+    short = [r for r in rows("x", 100) if r["level"] != "Highly Complex"]
+    short += [{"id": f"hc-{i}", "level": "Highly Complex"} for i in range(10)]
+    picked = pick_balanced(short, 200, random.Random(0))
+    assert len(picked) == 200
+    assert count(picked, "Highly Complex") == 10
+    assert all(count(picked, lvl) == 64 or count(picked, lvl) == 63 for lvl in ("Simple", "Moderate", "Complex"))
+
+
+def test_pick_balanced_never_exceeds_supply_or_repeats():
+    picked = pick_balanced(rows("x", 2), 100, random.Random(0))
+    assert len(picked) == 8 == len({r["id"] for r in picked})
+
+
+def test_assign_languages_two_different_and_close_to_the_shares():
+    group = rows("x", 500)
+    assign_languages(group, random.Random(0))
+    assert all(len(set(r["languages"])) == 2 for r in group)
+    counts = Counter(l for r in group for l in r["languages"])
+    for lang, share in LANGUAGE_SHARES.items():
+        assert abs(counts[lang] / (2 * len(group)) - share) < 0.01
+
+
+def test_assign_languages_works_on_tiny_groups():
+    for n in (0, 1, 2, 3):
+        group = rows("x", 1)[:n]
+        assign_languages(group, random.Random(0))
+        assert all(len(set(r["languages"])) == 2 for r in group)
+
+
+def test_drop_repeats_ignores_case_and_spacing_across_calls():
+    seen = set()
+    a = drop_repeats([{"question": "How many  users?"}, {"question": "how many users?"}], seen)
+    b = drop_repeats([{"question": "HOW MANY USERS?"}, {"question": "Other?"}], seen)
+    assert len(a) == 1 and [r["question"] for r in b] == ["Other?"]
+
+
+def test_split_trace_puts_only_the_final_block_in_the_answer():
+    reasoning, answer = split_trace(clean_trace(TRACE))
+    assert "SELECT 1;" in reasoning and "SELECT 2;" not in reasoning
+    assert answer == "```sql\nSELECT 2;\n```"
+
+
+def test_swap_question_keeps_schema_and_hint():
+    prompt = "Dialect: PostgreSQL\n\nSchema:\nCREATE TABLE q (a INT);\n\nHint: Question: is not here\n\nQuestion: How many?"
+    assert swap_question(prompt, "How many?", "Нечта?") == \
+        "Dialect: PostgreSQL\n\nSchema:\nCREATE TABLE q (a INT);\n\nHint: Question: is not here\n\nQuestion: Нечта?"
+    with pytest.raises(ValueError):
+        swap_question(prompt, "Another?", "Нечта?")
+
+
+def plan_row(languages, trace_source="deepseek-flash", qid="q1"):
+    answer = "Count them.\n\n```sql\nSELECT 1\n```" if trace_source == "synsql" else "Short.\n\n```sql\nSELECT 1\n```"
+    return {"id": qid, "level": "Simple", "style": "Formal", "question": "How many orders in 2023?", "hint": None,
+            "source": "synsql_2.5m", "license": "Apache-2.0", "schema_style": "plain", "dialect": "postgres",
+            "db_id": "synsql/s_x", "source_db": "x", "gold_sql": "SELECT 1", "languages": languages,
+            "prompt": "Dialect: PostgreSQL\n\nSchema:\nCREATE TABLE o (a INT);\n\nQuestion: How many orders in 2023?",
+            "reasoning": None if trace_source == "synsql" else "Think.", "answer": answer, "target_sql": "SELECT 1",
+            "trace_source": trace_source}
+
+
+def tr(lang, text, finish="stop", qid="q1"):
+    return {(qid, lang): {"question_id": qid, "language": lang, "english": "How many orders in 2023?", "content": text,
+                          "finish_reason": finish}}
+
+
+def test_examples_use_the_right_text_per_language():
+    translated = {**tr("ru", "Сколько заказов в 2023?"), **tr("uz", "2023-yilda nechta buyurtma bo'lgan?")}
+    made, dropped = make_examples(plan_row(["en", "ru"]), translated)
+    assert not dropped
+    assert [e["language"] for e in made] == ["en", "ru"]
+    assert made[0]["question"] == "How many orders in 2023?"
+    assert made[1]["messages"][1]["content"].endswith("Question: Сколько заказов в 2023?")
+    assert made[1]["question_en"] == "How many orders in 2023?" and made[1]["reasoning"] == "Think."
+    made, _ = make_examples(plan_row(["uz_cyrillic", "uz_latin"]), translated)
+    assert made[1]["question"] == "2023-yilda nechta buyurtma bo'lgan?"
+    assert "2023-йилда" in made[0]["question"] and made[0]["id"] == "q1-uz_cyrillic"
+
+
+def test_examples_split_a_synsql_trace():
+    made, _ = make_examples(plan_row(["en", "en"][:1], trace_source="synsql"), {})
+    assert made[0]["reasoning"] == "Count them." and made[0]["answer"] == "```sql\nSELECT 1\n```"
+
+
+def test_examples_drop_missing_flagged_and_cut_off_translations():
+    row = plan_row(["en", "ru"])
+    assert make_examples(row, {})[1] == {"no translation": 1}
+    assert make_examples(row, tr("ru", "Сколько заказов?"))[1] == {"translation flagged": 1}  # the 2023 was lost
+    assert make_examples(row, tr("ru", "Сколько заказов в 2023?", finish="length"))[1] == {"no translation": 1}
+    made, _ = make_examples(row, {})
+    assert [e["language"] for e in made] == ["en"]

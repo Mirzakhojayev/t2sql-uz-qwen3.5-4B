@@ -158,9 +158,10 @@ def _collect(name: str, out: str, shards: int, wait: bool, poll_s: int = 30) -> 
 
 @app.local_entrypoint()
 def main(prompts: str, out: str, thinking: bool = False, n: int = 1, max_tokens: int = 0, limit: int = 0,
-         shards: int = 1):
+         shards: int = 1, model_dir: str = MODEL_DIR):
     """--shards K splits the prompts round-robin over K GPUs that run in parallel: same total cost (plus one
-    model load, ~2.5 min, per extra GPU) but 1/K of the wall time."""
+    model load, ~2.5 min, per extra GPU) but 1/K of the wall time. --model-dir picks a trained model, e.g.
+    /cache/out/pilot/final."""
     records = [json.loads(line) for line in open(prompts, encoding="utf-8") if line.strip()]
     if limit:
         records = records[:limit]
@@ -176,7 +177,7 @@ def main(prompts: str, out: str, thinking: bool = False, n: int = 1, max_tokens:
 
     print(f"{len(records)} prompts on {shards} GPU(s), thinking={thinking}, n={n}, max_tokens={max_tokens}, run '{name}'")
     for k, chunk in chunks:
-        generate.spawn(chunk, thinking, n, max_tokens, name, k, shards)
+        generate.spawn(chunk, thinking, n, max_tokens, name, k, shards, model_dir)
     print("started. If this window dies, the GPUs keep going (needs `modal run --detach`); fetch with:\n"
           f"  modal run modal/generate.py::collect --out {out}")
     _collect(name, out, shards=shards, wait=True)

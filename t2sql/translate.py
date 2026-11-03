@@ -29,18 +29,29 @@ SYSTEM = (
 
 
 def jobs_for(questions: list[dict]) -> list[dict]:
+    """One job per question and language; a question with "translate_to" gets only those languages."""
     return [{
         "id": f"{lang}-{q['question_id']}", "question_id": q["question_id"], "language": lang,
         "db_id": q["db_id"], "difficulty": q["difficulty"], "english": q["question"],
         "source": q["source"], "license": q["license"], "split": q["split"],
-        "messages": [{"role": "system", "content": SYSTEM.format(language=desc)},
+        "messages": [{"role": "system", "content": SYSTEM.format(language=LANGUAGES[lang])},
                      {"role": "user", "content": q["question"]}],
-    } for q in questions for lang, desc in LANGUAGES.items()]
+    } for q in questions for lang in q.get("translate_to", LANGUAGES)]
+
+
+def looks_cut_off(english: str, text: str) -> bool:
+    """The API sometimes returns an empty or truncated answer and still reports finish_reason=stop."""
+    text, english = text.strip(), english.strip()
+    if not text or len(text) < 0.5 * len(english):
+        return True
+    return english[-1] in ".?!" and text[-1] not in ".?!…\"'»”)"
 
 
 def checks(rec: dict) -> list[str]:
     """Cheap automatic flags for the human reviewer; they do not judge translation quality."""
     text, flags = rec["content"] or "", []
+    if looks_cut_off(rec["english"], text):
+        flags.append("looks cut off")
     if rec["language"] == "uz" and re.search(r"[а-яА-ЯёЁ]", text):
         flags.append("Cyrillic in Uzbek Latin")
     if rec["language"] == "ru" and not re.search(r"[а-яА-ЯёЁ]", text):

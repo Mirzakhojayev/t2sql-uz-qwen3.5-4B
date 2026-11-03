@@ -3,3 +3,4 @@ sqlglot>=25
 pytest>=8
 openai>=1.50        # DeepSeek's API is OpenAI-compatible
 tokenizers>=0.20
+pyarrow>=15          # reads the Spider dev file for the leakage check
