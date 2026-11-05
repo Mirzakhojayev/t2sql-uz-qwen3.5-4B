@@ -11,6 +11,8 @@ Each GPU writes its results to the Modal volume (runs/<name>/shard_<k>.json) and
 merges them into --out. If it gets interrupted, the GPUs carry on; fetch the finished work later with:
   modal run modal/generate.py::collect --out data/runs/bird_zs/gen_think.jsonl
 
+In Git Bash, prefix commands that pass --model-dir with MSYS_NO_PATHCONV=1: it rewrites /cache/... into a Windows path.
+
 Sampling follows the Qwen3.5 card's "precise coding" settings (temperature 0.6 thinking / 0.7 non-thinking,
 top_p 0.95 / 0.8, top_k 20), except presence_penalty is 0 in both modes: SQL must repeat table and column
 names, which a presence penalty discourages. The function timeout (45 min on an A100 80GB, about $1.9) is the
@@ -28,6 +30,8 @@ vol = modal.Volume.from_name("t2sql-cache", create_if_missing=True)
 CACHE = "/cache"
 MODEL_DIR = f"{CACHE}/models/Qwen3.5-4B"
 MAX_MODEL_LEN = 49152  # about 10k prompt + 32k thinking + margin
+FUNCTION_TIMEOUT_S = 2700  # 45 min
+GIVE_UP_AFTER_S = FUNCTION_TIMEOUT_S + 900  # image build and queueing on top; past this no GPU can still be working
 
 # The model card asks for vLLM from the nightly index. The CUDA backend must be named explicitly: image builds
 # run on a machine without a GPU, where --torch-backend=auto silently installs CPU-only torch (found 2026-10-30).
@@ -41,9 +45,21 @@ vllm_image = (
 )
 
 
-@app.function(image=vllm_image, gpu="A100-80GB", volumes={CACHE: vol}, timeout=2700)  # 45 min: about $1.9 per GPU at most
+@app.function(image=vllm_image, gpu="A100-80GB", volumes={CACHE: vol}, timeout=FUNCTION_TIMEOUT_S)  # about $1.9 per GPU at most
 def generate(records: list[dict], thinking: bool, n: int, max_tokens: int, name: str, shard: int, shards: int,
              model_dir: str = MODEL_DIR) -> str:
+    try:
+        return _generate(records, thinking, n, max_tokens, name, shard, shards, model_dir)
+    except Exception as exc:  # the waiting side only reads the volume, so the failure has to be written there
+        os.makedirs(f"{CACHE}/runs/{name}", exist_ok=True)
+        with open(f"{CACHE}/runs/{name}/error_{shard}.txt", "w", encoding="utf-8") as fh:
+            fh.write(f"{type(exc).__name__}: {exc}"[:2000])
+        vol.commit()
+        raise
+
+
+def _generate(records: list[dict], thinking: bool, n: int, max_tokens: int, name: str, shard: int, shards: int,
+              model_dir: str) -> str:
     import vllm
     from vllm import LLM, SamplingParams
 
@@ -104,17 +120,26 @@ def generate(records: list[dict], thinking: bool, n: int, max_tokens: int, name:
 
 # ---- local side: start the shards, wait for their files in the volume, merge ------------------------------------
 
+def _read_text(path: str) -> str:
+    return b"".join(vol.read_file(path)).decode("utf-8")
+
+
 def _read_shard(path: str) -> dict:
-    return json.loads(b"".join(vol.read_file(path)).decode("utf-8"))
+    return json.loads(_read_text(path))
 
 
 def _collect(name: str, out: str, shards: int, wait: bool, poll_s: int = 30) -> bool:
     """Merge runs/<name>/shard_*.json from the volume into `out`. shards=0: read the count from the files."""
     found: dict[int, dict] = {}
+    started = time.time()
     while True:
+        if wait and time.time() - started > GIVE_UP_AFTER_S:
+            raise SystemExit(f"gave up after {GIVE_UP_AFTER_S // 60} min with {len(found)} shards: see `modal app logs`")
         try:
             for e in vol.listdir(f"runs/{name}"):
                 base = os.path.basename(e.path)
+                if base.startswith("error_"):
+                    raise SystemExit(f"{base}: {_read_text(e.path)}")
                 if base.startswith("shard_") and base.endswith(".json"):
                     k = int(base[len("shard_"):-len(".json")])
                     if k not in found:

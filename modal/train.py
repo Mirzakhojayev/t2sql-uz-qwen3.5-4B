@@ -32,16 +32,26 @@ app = modal.App("t2sql-train")
 vol = modal.Volume.from_name("t2sql-cache", create_if_missing=True)
 CACHE = "/cache"
 MODEL_DIR = f"{CACHE}/models/Qwen3.5-4B"
-GPU_USD_PER_HOUR = 2.50
+GPU_USD_PER_HOUR = {"A100-80GB": 2.50, "H100": 3.95}  # modal.com/pricing, 2026-11-03; both have 80 GB
 MAX_LENGTH = 16384  # decided 2026-10-31
 HOLDOUT_PCT = 2  # of pilot questions, for validation loss only; eval sets never come here
 LOGIT_CHUNK = 2048
 
 # the versions that passed the tooling check on 2026-10-29
-train_image = modal.Image.debian_slim(python_version="3.11").pip_install(
-    "torch==2.15.0", "transformers==5.21.1", "accelerate==1.15.0", "flash-linear-attention==0.6.0", "safetensors",
-    "sentencepiece",
-).env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})  # 11.8 GB sat unusable in the first test's OOM
+# causal_conv1d has no wheel on PyPI and needs nvcc to build, hence NVIDIA's image at torch 2.15's CUDA version. Without
+# it the DeltaNet layers fall back to a reference PyTorch implementation that transformers warns is much slower.
+train_image = (
+    modal.Image.from_registry("nvidia/cuda:13.2.1-devel-ubuntu22.04", add_python="3.11")
+    .pip_install("torch==2.15.0", "transformers==5.21.1", "accelerate==1.15.0", "flash-linear-attention==0.6.0",
+                 "safetensors", "sentencepiece", "setuptools", "wheel", "packaging", "ninja")
+    .env({"CAUSAL_CONV1D_FORCE_BUILD": "TRUE"})
+    # add_python's standalone build links with clang++, which this image lacks. The compiler's output overflows
+    # Modal's log limit and hides any error, so it goes to a file.
+    .env({"CC": "gcc", "CXX": "g++", "LDSHARED": "g++ -pthread -shared", "LDCXXSHARED": "g++ -pthread -shared"})
+    .run_commands("pip install --no-build-isolation causal-conv1d==1.7.0 > /tmp/build.log 2>&1 || (tail -60 /tmp/build.log | cut -c1-300; exit 1)",
+                  "python -c 'import causal_conv1d'")
+    .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})  # 11.8 GB sat unusable in the first test's OOM
+)
 
 
 # ---- pure helpers, tested in t2sql/tests/test_train.py ---------------------------------------------------------
@@ -92,7 +102,7 @@ def lr_at(step: int, total: int, base: float, warmup_pct: float = 0.05) -> float
 
 @app.function(image=train_image, gpu="A100-80GB", volumes={CACHE: vol}, timeout=6 * 3600)  # at most $15
 def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, max_examples: int, accum: int,
-          max_steps: int, max_hours: float, save_every_minutes: int, seed: int) -> dict:
+          max_steps: int, max_hours: float, save_every_minutes: int, seed: int, gpu: str) -> dict:
     import torch
     import torch.nn.functional as F
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -241,7 +251,7 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
                        "loss": round(window_loss / window_n, 4), "lr": optimizer.param_groups[0]["lr"],
                        "tok_per_s": round(train_padded / max(train_seconds, 1e-6)),
                        "peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 1),
-                       "usd": round((time.time() - started) / 3600 * GPU_USD_PER_HOUR, 2)}
+                       "usd": round((time.time() - started) / 3600 * GPU_USD_PER_HOUR[gpu], 2)}
                 log_rows.append(row)
                 print(json.dumps(row), flush=True)
                 window_loss, window_n = 0.0, 0
@@ -263,13 +273,13 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
     # --- finish ---
     speed = train_padded / max(train_seconds, 1e-6)
     summary = {
-        "name": name, "stop_reason": stop_reason or "finished", "train_examples": len(train_set),
+        "name": name, "gpu": gpu, "stop_reason": stop_reason or "finished", "train_examples": len(train_set),
         "holdout_examples": len(holdout), "dropped": dropped, "epochs": epochs, "lr": lr, "max_tokens": max_tokens,
         "max_examples": max_examples, "accum": accum, "batches_run": done_batches, "opt_steps": opt_step,
         "first_batch_seconds": round(first_batch_seconds or 0), "padded_tok_per_s": round(speed),
         "peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 1), "holdout_loss": validate(),
         "planned_padded_tokens": total_padded, "projected_hours_full_run": round(total_padded / speed / 3600, 2),
-        "projected_usd_full_run": round(total_padded / speed / 3600 * GPU_USD_PER_HOUR, 2),
+        "projected_usd_full_run": round(total_padded / speed / 3600 * GPU_USD_PER_HOUR[gpu], 2),
         "log": log_rows,
     }
     if stop_reason == "max_hours":
@@ -286,7 +296,7 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
             if (resume_dir / leftover).exists():
                 (resume_dir / leftover).unlink()
     summary["hours"] = round((time.time() - started) / 3600, 3)
-    summary["usd"] = round(summary["hours"] * GPU_USD_PER_HOUR, 2)
+    summary["usd"] = round(summary["hours"] * GPU_USD_PER_HOUR[gpu], 2)
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     vol.commit()
     print(json.dumps({k: v for k, v in summary.items() if k != "log"}, indent=1), flush=True)
@@ -297,7 +307,8 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
 
 @app.local_entrypoint()
 def main(data: str, name: str, epochs: int = 2, lr: float = 2e-5, max_tokens: int = 20480, max_examples: int = 8,
-         accum: int = 3, max_steps: int = 0, max_hours: float = 5.5, save_every_minutes: int = 45, seed: int = 0):
+         accum: int = 3, max_steps: int = 0, max_hours: float = 5.5, save_every_minutes: int = 45, seed: int = 0,
+         gpu: str = "A100-80GB"):
     keep = ("id", "question_id", "language", "messages", "reasoning", "answer")
     slim = [{k: r[k] for k in keep} for r in map(json.loads, open(data, encoding="utf-8"))]
     upload = Path(data).with_suffix(".train_upload.jsonl")
@@ -307,9 +318,9 @@ def main(data: str, name: str, epochs: int = 2, lr: float = 2e-5, max_tokens: in
     remote = f"train_data/{name}.jsonl"
     with vol.batch_upload(force=True) as batch:
         batch.put_file(str(upload), remote)
-    print(f"uploaded {len(slim)} examples to {remote}. Worst case ${max_hours * GPU_USD_PER_HOUR:.2f} (--max-hours {max_hours})")
-    call = train.spawn(f"{CACHE}/{remote}", name, epochs, lr, max_tokens, max_examples, accum, max_steps, max_hours,
-                       save_every_minutes, seed)
+    print(f"uploaded {len(slim)} examples to {remote}. Worst case ${max_hours * GPU_USD_PER_HOUR[gpu]:.2f} on {gpu} (--max-hours {max_hours})")
+    call = train.with_options(gpu=gpu).spawn(f"{CACHE}/{remote}", name, epochs, lr, max_tokens, max_examples, accum,
+                                             max_steps, max_hours, save_every_minutes, seed, gpu)
     print(f"started: {call.object_id}. If this window dies the GPU keeps going (needs `modal run --detach`); see "
           f"out/{name}/summary.json on the volume")
     summary = call.get()
