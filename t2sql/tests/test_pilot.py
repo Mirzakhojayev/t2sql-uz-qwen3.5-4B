@@ -4,10 +4,35 @@ from collections import Counter
 import pytest
 
 from t2sql.pilot import (
-    CALLS_PER_LEVEL, LANGUAGE_SHARES, MESSY_SHARE_OF_PG, assign_languages, clean_trace, drop_repeats, make_examples,
-    pick_balanced, pick_jobs, split_trace, swap_question,
+    CALLS_PER_LEVEL, LANGUAGE_SHARES, MESSY_SHARE_OF_PG, assign_languages, clean_examples, clean_trace, drop_repeats,
+    make_examples, pick_balanced, pick_jobs, split_trace, swap_question,
 )
 from t2sql.prompt import extract_sql
+
+
+def example(qid, reasoning="Join users to orders.", style="plain", dialect="postgres"):
+    return {"question_id": qid, "reasoning": reasoning, "schema_style": style, "dialect": dialect}
+
+
+def test_clean_examples_drops_meta_talk_messy_styles_and_empty_reasoning():
+    rows = [
+        example("keep"), example("short", style="abbrev"),
+        example("gold", "We need guess gold."), example("bench", "Which is more likely in benchmark?"),
+        example("memory", "Let's search memory: similar questions."), example("setup", "The training example should be simple."),
+        example("uz", style="uz_latin"), example("mix", style="mixed"), example("cyr", style="cyrillic"),
+        example("tr", style="translit"), example("empty", ""),
+    ]
+    assert {r["question_id"] for r in clean_examples(rows)} == {"keep", "short"}
+
+
+def test_clean_examples_keeps_every_language_of_a_chosen_question():
+    rows = [example(f"pg{i}") for i in range(20) for _ in range(2)] + [
+        example(f"lite{i}", dialect="sqlite") for i in range(20) for _ in range(2)]
+    kept = clean_examples(rows, questions=20)
+    assert len({r["question_id"] for r in kept}) == 20
+    assert len(kept) == 40
+    assert len({r["question_id"] for r in kept if r["dialect"] == "postgres"}) == 13  # 65% of 20
+    assert kept == clean_examples(rows, questions=20)
 
 
 def rows(prefix, per_level):

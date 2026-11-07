@@ -24,7 +24,7 @@ from .synsql import DB_DIR, LEVELS
 RUN_DIR = Path("data/runs/teacher_test")
 
 TEACHER_SYSTEM = (
-    "You are an expert SQL engineer writing training examples for a smaller text-to-SQL model. "
+    "You are an expert SQL engineer. "  # no word about training: it leaked into the reasoning (audit 2026-11-05)
     "Given a database schema and a question, write a short step-by-step explanation in English "
     "(which tables and columns, which joins, filters and aggregations, and any dialect pitfalls), "
     "then exactly one final query in a ```sql code block. The query must run on the dialect named in the "

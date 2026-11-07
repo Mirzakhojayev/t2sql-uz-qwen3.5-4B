@@ -6,6 +6,7 @@
   python -m t2sql.pilot select                # score against gold, pick the pilot, assign languages: pilot_plan.jsonl
   python -m t2sql.pilot translate --max-usd 3 # Russian and Uzbek Latin for the plan: translations.jsonl (resumes)
   python -m t2sql.pilot build                 # the training file, with Uzbek Cyrillic and a leakage check: pilot_10k.jsonl
+  python -m t2sql.pilot clean --questions 500 # drop meta talk and messy styles, keep N questions: pilot_clean_500.jsonl
 
 Pilot shape (decided 2026-11-02): 10k examples from 5,000 questions, 2 languages per question.
 65% PostgreSQL: 3,250 accepted questions, of which 1,250 messy (25% of all questions) and 2,000 plain.
@@ -52,6 +53,15 @@ TARGETS = {"pg_messy": 1250, "pg_plain": 2000, "sqlite_plain": 1750}
 LANGUAGE_SHARES = {"en": .28, "ru": .28, "uz_latin": .35, "uz_cyrillic": .09}
 REFERENCE = re.compile(r"reference\s+(solution|query|sql)", re.IGNORECASE)
 SQL_BLOCK = re.compile(r"```[^\S\n]*sql[^\S\n]*\n.*?```", re.IGNORECASE | re.DOTALL)
+# Reasoning about the benchmark or the teaching setup instead of the question. It can also hit a real "benchmark"
+# column; losing those few examples is cheaper than training on the rest.
+META_TALK = re.compile(
+    r"\b(gold (sql|query|answer|solution)|guess gold|benchmark|ground truth|grader|graded|test harness|likely generated"
+    r"|generated (from|by|dataset|question)|dataset (generat|author|creator)|question (was|is) generated"
+    r"|intended (sql|query|answer|solution)|expected (sql|query|answer|output|result)|evaluator|evaluated against"
+    r"|will be compared|search memory|from memory|i recall|recall (that|the)|training example"
+    r"|smaller (text-to-sql )?model)\b", re.IGNORECASE)
+KEEP_STYLES = {"plain", "abbrev"}  # decided 2026-11-05: transliterated, Uzbek, Cyrillic and mixed names move out of v1
 PG_SHARE = 0.65
 MESSY_SHARE_OF_PG = 1250 / 3250
 # teacher calls per level, sized for about 800 accepted questions each; None = all that exist
@@ -372,9 +382,36 @@ def build() -> dict:
     return report
 
 
+def clean_examples(rows: list[dict], questions: int = 0, seed: int = 0) -> list[dict]:
+    """Rows with usable reasoning and a kept schema style. questions > 0 keeps that many, all languages of each, at
+    the planned dialect mix: cleaning removes only PostgreSQL rows, so a plain random pick would drift towards SQLite."""
+    kept = [r for r in rows if r["schema_style"] in KEEP_STYLES and r["reasoning"] and not META_TALK.search(r["reasoning"])]
+    if questions:
+        rng = random.Random(seed)
+        chosen: set[str] = set()
+        for dialect, n in (("postgres", round(questions * PG_SHARE)), ("sqlite", questions - round(questions * PG_SHARE))):
+            ids = sorted({r["question_id"] for r in kept if r["dialect"] == dialect})
+            chosen.update(rng.sample(ids, min(n, len(ids))))
+        kept = [r for r in kept if r["question_id"] in chosen]
+    return kept
+
+
+def clean(questions: int, seed: int = 0) -> dict:
+    rows = [json.loads(line) for line in open(PILOT_FILE, encoding="utf-8")]
+    kept = clean_examples(rows, questions, seed)
+    out = OUT_DIR / (f"pilot_clean_{questions}.jsonl" if questions else "pilot_clean.jsonl")
+    with open(out, "w", encoding="utf-8") as fh:
+        for r in kept:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return {"file": str(out), "examples": len(kept), "questions": len({r["question_id"] for r in kept}),
+            **{key: dict(Counter(r[key] for r in kept)) for key in ("language", "dialect", "level", "schema_style")}}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    cl = sub.add_parser("clean")
+    cl.add_argument("--questions", type=int, default=0)
     sub.add_parser("plan")
     p = sub.add_parser("probe")
     p.add_argument("--n", type=int, default=100)
@@ -389,6 +426,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("build")
     args = ap.parse_args(argv)
 
+    if args.cmd == "clean":
+        print(json.dumps(clean(args.questions), indent=1))
+        return 0
     if args.cmd == "build":
         print(json.dumps(build(), indent=1))
         return 0
