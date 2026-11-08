@@ -61,8 +61,13 @@ PAUQ test, RedSQL or BIRD-CRITIC. The leakage check runs on every training file.
 
 - Learning rate 5e-6 or lower for full fine-tuning: 2e-5 raised syntax errors from 1.0% to 11.0% after 48 steps.
 - A run is damaging the model if syntax errors on G3 rise more than 1 point above base (1.0%): stop and lower the rate.
-- Before trusting any trained score, the round trip must be checked once: base saved through `modal/train.py` with
-  learning rate 0 must score like base on G3. Not yet done (2026-11-07).
+- The round trip is checked (2026-11-07): base saved through `modal/train.py` with learning rate 0 scores like base
+  (15.5 vs 16.1, p=.51), so a drop after training is a training effect, not a saving or loading bug.
+- Do not train on teacher reasoning for now. Every model trained on DeepSeek's traces (SynSQL or BIRD train, 500 or
+  5,000 questions, 2e-5 or 5e-6) thought less than base (mean 1,240-1,864 tokens vs 3,976) and scored lower (6.0-12.8
+  vs 16.1). Real BIRD data did help against SynSQL (10.5 vs 8.8; unknown columns 16.5% -> 8.1%), so keep rules 1-6.
+- BIRD train is much easier than the eval (Mini-Dev is 92% "challenging"; subqueries 62% vs 8%), and keeping only
+  answers that match gold halves the hard skills again (CAST 8.9% -> 5.4%). Check the skill mix after filtering.
 
 ## How a result is read (G3)
 

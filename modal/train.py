@@ -278,8 +278,10 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
         "max_examples": max_examples, "accum": accum, "batches_run": done_batches, "opt_steps": opt_step,
         "first_batch_seconds": round(first_batch_seconds or 0), "padded_tok_per_s": round(speed),
         "peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 1), "holdout_loss": validate(),
-        "planned_padded_tokens": total_padded, "projected_hours_full_run": round(total_padded / speed / 3600, 2),
-        "projected_usd_full_run": round(total_padded / speed / 3600 * GPU_USD_PER_HOUR[gpu], 2),
+        # a one-batch run has no speed: its only batch is the first, which is left out of the measurement
+        "planned_padded_tokens": total_padded,
+        "projected_hours_full_run": round(total_padded / speed / 3600, 2) if train_padded else None,
+        "projected_usd_full_run": round(total_padded / speed / 3600 * GPU_USD_PER_HOUR[gpu], 2) if train_padded else None,
         "log": log_rows,
     }
     if stop_reason == "max_hours":
