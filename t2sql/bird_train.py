@@ -146,7 +146,8 @@ def postgres_ddl(db: str) -> str:
         return schema_to_ddl(read_postgres_schema(conn))
 
 
-def prepare(questions: int, seed: int = 0) -> dict:
+def prepare(questions: int, seed: int = 0, factor: float = CANDIDATES_PER_KEPT, jobs_path: Path = JOBS) -> dict:
+    """factor: questions checked per question wanted. 1 for self-training, where every checked question is used."""
     rng = random.Random(seed)
     rows = json.load(open(ROOT / "train" / "train.json", encoding="utf-8"))
     sizes = {p.parent.name: p.stat().st_size / 1e6 for p in db_dir().glob("*/*.sqlite")}
@@ -166,10 +167,10 @@ def prepare(questions: int, seed: int = 0) -> dict:
     candidates = drop_repeats(candidates, set())
 
     n_pg = round(questions * PG_SHARE)
-    pg_pick = round_robin(candidates, round(n_pg * CANDIDATES_PER_KEPT), rng)
+    pg_pick = round_robin(candidates, round(n_pg * factor), rng)
     taken = {r["id"] for r in pg_pick}
     lite_pick = round_robin([r for r in candidates if r["id"] not in taken],
-                            round((questions - n_pg) * CANDIDATES_PER_KEPT), rng)
+                            round((questions - n_pg) * factor), rng)
     used_dbs = sorted({r["db_id"] for r in pg_pick + lite_pick})
     loaded = load_postgres(sorted({r["db_id"] for r in pg_pick}))
 
@@ -203,7 +204,8 @@ def prepare(questions: int, seed: int = 0) -> dict:
     ddl: dict[tuple[str, str], str] = {}
     OUT.mkdir(parents=True, exist_ok=True)
     jobs = [r for r in checked if r]
-    with open(JOBS, "w", encoding="utf-8") as fh:
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(jobs_path, "w", encoding="utf-8") as fh:
         for r in jobs:
             key = (r["dialect"], r["db_id"])
             if key not in ddl:
@@ -319,13 +321,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("unzip")
     for name in ("prepare", "select", "build"):
         sub.add_parser(name).add_argument("--questions", type=int, default=500)
+    sub.choices["prepare"].add_argument("--factor", type=float, default=CANDIDATES_PER_KEPT)
+    sub.choices["prepare"].add_argument("--jobs", type=Path, default=JOBS)
     for name in ("call", "translate"):
         sub.add_parser(name).add_argument("--max-usd", type=float, required=True)
     args = ap.parse_args(argv)
     if args.cmd == "unzip":
         result = unzip()
     elif args.cmd == "prepare":
-        result = prepare(args.questions)
+        result = prepare(args.questions, factor=args.factor, jobs_path=args.jobs)
     elif args.cmd == "call":
         result = teacher.run(load_jsonl(JOBS), ANSWERS, effort="high", max_usd=args.max_usd)
     elif args.cmd == "select":
