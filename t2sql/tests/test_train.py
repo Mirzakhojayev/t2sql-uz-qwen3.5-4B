@@ -15,6 +15,10 @@ def test_target_closes_thinking_then_answer_and_stop_token():
         "Count rows.\n</think>\n\n```sql\nSELECT 1\n```<|im_end|>"
 
 
+def test_target_without_thinking_is_the_answer_alone():
+    assert target_text({"reasoning": "", "answer": "```sql\nSELECT 1\n```\n"}, thinking=False) == "```sql\nSELECT 1\n```<|im_end|>"
+
+
 def test_holdout_is_stable_and_small():
     ids = [f"synsql-{i}" for i in range(5000)]
     held = [i for i in ids if is_holdout(i)]

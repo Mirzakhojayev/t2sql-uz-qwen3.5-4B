@@ -59,6 +59,7 @@ class Column:
     type: str                     # declared type, upper-case ("INTEGER", "TEXT", ...); "" if none declared
     primary_key: bool = False     # True only for a single-column primary key
     examples: list = field(default_factory=list)  # raw Python values, most frequent first
+    description: str = ""         # what the column means, from the database's documentation (t2sql/describe.py)
 
 
 @dataclass
@@ -156,17 +157,20 @@ def extract_sql(text: str) -> str | None:
     return result.strip().rstrip(";").strip() or None
 
 
-def build_prompt(dialect: str, ddl: str, question: str, hint: str | None = None) -> str:
+def build_prompt(dialect: str, ddl: str, question: str, hint: str | None = None, values: str | None = None) -> str:
     """Assemble the prompt text exactly as in the module docstring.
 
     dialect: "sqlite" -> "SQLite"; "postgres" or "postgresql" -> "PostgreSQL"; anything else -> ValueError.
     The Hint block appears only when hint is a non-empty string. No trailing newline.
+    values: optional block of database values that match the question (t2sql/describe.py), placed after the schema.
     """
     names = {"sqlite": "SQLite", "postgres": "PostgreSQL", "postgresql": "PostgreSQL"}
     if dialect not in names:
         raise ValueError(f"unknown dialect: {dialect!r}")
 
     parts = [f"Dialect: {names[dialect]}", f"Schema:\n{ddl}"]
+    if values:
+        parts.append(f"Values in the database that match the question:\n{values}")
     if hint:
         parts.append(f"Hint: {hint}")
     parts.append(f"Question: {question}")
@@ -195,9 +199,10 @@ def schema_to_ddl(tables: list[Table]) -> str:
                 line += " " + col.type
             if col.primary_key:
                 line += " PRIMARY KEY"
-            comment = ""
+            notes = [col.description] if col.description else []
             if col.examples:
-                comment = " -- e.g. " + ", ".join(format_value(v) for v in col.examples)
+                notes.append("e.g. " + ", ".join(format_value(v) for v in col.examples))
+            comment = " -- " + "; ".join(notes) if notes else ""
             items.append((line, comment))
 
         if table.primary_key:

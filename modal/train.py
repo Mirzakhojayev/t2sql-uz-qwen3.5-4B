@@ -51,12 +51,17 @@ train_image = (
     .run_commands("pip install --no-build-isolation causal-conv1d==1.7.0 > /tmp/build.log 2>&1 || (tail -60 /tmp/build.log | cut -c1-300; exit 1)",
                   "python -c 'import causal_conv1d'")
     .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})  # 11.8 GB sat unusable in the first test's OOM
+    .pip_install("peft==0.21.3")  # last, so that adding it does not rebuild causal_conv1d
 )
 
 
 # ---- pure helpers, tested in t2sql/tests/test_train.py ---------------------------------------------------------
 
-def target_text(example: dict) -> str:
+def target_text(example: dict, thinking: bool = True) -> str:
+    """What the model must write after the prompt. Without thinking the prompt already holds an empty think block,
+    so the target is the answer alone."""
+    if not thinking:
+        return f"{example['answer'].strip()}<|im_end|>"
     return f"{example['reasoning'].strip()}\n</think>\n\n{example['answer'].strip()}<|im_end|>"
 
 
@@ -102,7 +107,8 @@ def lr_at(step: int, total: int, base: float, warmup_pct: float = 0.05) -> float
 
 @app.function(image=train_image, gpu="A100-80GB", volumes={CACHE: vol}, timeout=6 * 3600)  # at most $15
 def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, max_examples: int, accum: int,
-          max_steps: int, max_hours: float, save_every_minutes: int, seed: int, gpu: str) -> dict:
+          max_steps: int, max_hours: float, save_every_minutes: int, seed: int, gpu: str,
+          thinking: bool = True, lora_rank: int = 0, max_length: int = MAX_LENGTH) -> dict:
     import torch
     import torch.nn.functional as F
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -119,15 +125,15 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
     rows = [json.loads(line) for line in open(data_path, encoding="utf-8")]
     encoded, dropped = {"train": [], "holdout": []}, {"no_reasoning": 0, "too_long": 0}
     for ex in rows:
-        if not (ex.get("reasoning") or "").strip():
+        if thinking and not (ex.get("reasoning") or "").strip():
             dropped["no_reasoning"] += 1
             continue
-        prompt = tok.apply_chat_template(ex["messages"], tokenize=False, add_generation_prompt=True, enable_thinking=True)
-        if not prompt.endswith("<think>\n"):
+        prompt = tok.apply_chat_template(ex["messages"], tokenize=False, add_generation_prompt=True, enable_thinking=thinking)
+        if thinking and not prompt.endswith("<think>\n"):
             raise ValueError(f"unexpected end of the chat template: {prompt[-40:]!r}")
         p = tok(prompt, add_special_tokens=False).input_ids
-        t = tok(target_text(ex), add_special_tokens=False).input_ids
-        if len(p) + len(t) > MAX_LENGTH:
+        t = tok(target_text(ex, thinking), add_special_tokens=False).input_ids
+        if len(p) + len(t) > max_length:
             dropped["too_long"] += 1
             continue
         encoded["holdout" if is_holdout(ex["question_id"]) else "train"].append((p + t, len(p)))
@@ -136,7 +142,8 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
     print(f"{len(train_set)} train, {len(holdout)} holdout, dropped {dropped}; length p50 {sorted(lengths)[len(lengths) // 2]} "
           f"max {max(lengths)}; {time.time() - started:.0f}s", flush=True)
     sample = rows[0]
-    print("target of the first example ends with:", repr(target_text(sample)[-60:]), flush=True)
+    print("prompt of the last example ends with:", repr(prompt[-60:]), flush=True)
+    print("target of the first example ends with:", repr(target_text(sample, thinking)[-60:]), flush=True)
 
     epoch_batches = [token_batches(lengths, max_tokens, max_examples, random.Random(seed + e),
                                    longest_first=max_steps > 0 and e == 0) for e in range(epochs)]
@@ -148,16 +155,26 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
 
     # --- model ---
     model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, dtype=torch.float32).to("cuda")
+    core = model  # the Qwen model itself; with LoRA, `model` becomes the wrapper around it
+    if lora_rank:
+        import peft
+
+        # LoRA trains small add-on matrices and leaves every original weight as it is: full fine-tuning changed
+        # 85% of the weights and each run lost accuracy on hard questions (docs/data-rules.md).
+        model = peft.get_peft_model(model, peft.LoraConfig(
+            r=lora_rank, lora_alpha=2 * lora_rank, lora_dropout=0.05, target_modules="all-linear", bias="none",
+            task_type="CAUSAL_LM"))
+        print(f"peft {peft.__version__}, LoRA rank {lora_rank}", flush=True)
     position = {"epoch": 0, "batch": 0, "opt_step": 0}
     if (resume_dir / "state.json").exists():
-        model.load_state_dict(torch.load(resume_dir / "weights.pt", map_location="cuda"))
+        model.load_state_dict(torch.load(resume_dir / "weights.pt", map_location="cuda"), strict=not lora_rank)
         position = json.loads((resume_dir / "state.json").read_text())
         print(f"resumed at {position}", flush=True)
     model.config.use_cache = False
-    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    core.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.train()
-    decoder, lm_head = model.model, model.lm_head
-    for frozen in (model.get_input_embeddings(), lm_head):
+    decoder, lm_head = core.model, core.lm_head
+    for frozen in (core.get_input_embeddings(), lm_head):
         frozen.requires_grad_(False)
     trained = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trained, lr=lr, weight_decay=0.0, fused=True)
@@ -204,7 +221,10 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
     def save_resume(at: dict) -> None:
         resume_dir.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
-        torch.save(model.state_dict(), resume_dir / "weights.tmp")
+        state = model.state_dict()
+        if lora_rank:  # the base weights never change: saving them would write 16 GB for nothing
+            state = {k: v for k, v in state.items() if "lora_" in k}
+        torch.save(state, resume_dir / "weights.tmp")
         os.replace(resume_dir / "weights.tmp", resume_dir / "weights.pt")
         (resume_dir / "state.json").write_text(json.dumps(at))
         vol.commit()
@@ -275,7 +295,8 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
     summary = {
         "name": name, "gpu": gpu, "stop_reason": stop_reason or "finished", "train_examples": len(train_set),
         "holdout_examples": len(holdout), "dropped": dropped, "epochs": epochs, "lr": lr, "max_tokens": max_tokens,
-        "max_examples": max_examples, "accum": accum, "batches_run": done_batches, "opt_steps": opt_step,
+        "max_examples": max_examples, "accum": accum, "thinking": thinking, "lora_rank": lora_rank, "max_length": max_length,
+        "batches_run": done_batches, "opt_steps": opt_step,
         "first_batch_seconds": round(first_batch_seconds or 0), "padded_tok_per_s": round(speed),
         "peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 1), "holdout_loss": validate(),
         # a one-batch run has no speed: its only batch is the first, which is left out of the measurement
@@ -289,8 +310,11 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
     else:
         final = out_dir / "final"
         t0 = time.time()
-        model.gradient_checkpointing_disable()
-        model.config.use_cache = True
+        core.gradient_checkpointing_disable()
+        core.config.use_cache = True
+        if lora_rank:
+            model.save_pretrained(out_dir / "adapter")  # the small add-on by itself, for publishing
+            model = model.merge_and_unload()  # one ordinary model again, which is what generation loads
         model.to(torch.bfloat16).save_pretrained(final)
         tok.save_pretrained(final)
         summary["save_seconds"] = round(time.time() - t0)
@@ -310,7 +334,10 @@ def train(data_path: str, name: str, epochs: int, lr: float, max_tokens: int, ma
 @app.local_entrypoint()
 def main(data: str, name: str, epochs: int = 2, lr: float = 2e-5, max_tokens: int = 20480, max_examples: int = 8,
          accum: int = 3, max_steps: int = 0, max_hours: float = 5.5, save_every_minutes: int = 45, seed: int = 0,
-         gpu: str = "A100-80GB"):
+         gpu: str = "A100-80GB", thinking: bool = True, lora_rank: int = 0, max_length: int = MAX_LENGTH):
+    """--no-thinking trains the answer alone (no reasoning). --lora-rank N trains LoRA add-ons of rank N instead of
+    the weights themselves; use a higher learning rate with it (1e-4). --max-length drops longer examples (in tokens):
+    a few huge schemas can take a third of the training time."""
     keep = ("id", "question_id", "language", "messages", "reasoning", "answer")
     slim = [{k: r[k] for k in keep} for r in map(json.loads, open(data, encoding="utf-8"))]
     upload = Path(data).with_suffix(".train_upload.jsonl")
@@ -322,7 +349,7 @@ def main(data: str, name: str, epochs: int = 2, lr: float = 2e-5, max_tokens: in
         batch.put_file(str(upload), remote)
     print(f"uploaded {len(slim)} examples to {remote}. Worst case ${max_hours * GPU_USD_PER_HOUR[gpu]:.2f} on {gpu} (--max-hours {max_hours})")
     call = train.with_options(gpu=gpu).spawn(f"{CACHE}/{remote}", name, epochs, lr, max_tokens, max_examples, accum,
-                                             max_steps, max_hours, save_every_minutes, seed, gpu)
+                                             max_steps, max_hours, save_every_minutes, seed, gpu, thinking, lora_rank, max_length)
     print(f"started: {call.object_id}. If this window dies the GPU keeps going (needs `modal run --detach`); see "
           f"out/{name}/summary.json on the volume")
     summary = call.get()

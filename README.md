@@ -9,11 +9,25 @@ Status: Phase 0 (setup and bake-offs).
 |---|---|
 | `docker/` | PostgreSQL 17 for scoring: read-only user, statement timeout |
 | `eval/` | Eval harness: executes generated SQL and computes execution accuracy |
-| `modal/` | GPU scripts (token counts on CPU, tooling check, bake-offs) |
+| `modal/` | GPU scripts: model download, training (full or LoRA), generation with vLLM |
+| `t2sql/` | Data pipeline: prompts, translation, training-data building, self-correction |
+| `docs/` | Data rules and findings |
 | `data/` | Databases and datasets (gitignored) |
-| `configs/` | Training configs |
 
 Generation runs on a GPU (Modal) and only writes files. Scoring runs here, on the local machine.
+
+### Running on another GPU provider
+
+The scripts in `modal/` use Modal only for three things: the `@app.function` decorators (which GPU, time limit),
+a storage volume mounted at `/cache`, and the container image. The work inside is plain PyTorch, Hugging Face
+`transformers`/`peft` and vLLM. To run elsewhere (RunPod, a university cluster, your own GPU):
+
+1. Install the package versions pinned in the image definitions at the top of `modal/train.py` and
+   `modal/generate.py` (the exact versions matter: Qwen3.5 needs a recent vLLM and `causal-conv1d` for speed).
+2. Download `Qwen/Qwen3.5-4B` from Hugging Face into a local folder.
+3. Call the body of `train()` or `_generate()` directly, with `/cache/...` paths replaced by local paths.
+
+Training needs an 80 GB GPU for full fine-tuning, or about 33 GB with LoRA (`--lora-rank 32`).
 
 ## Phase 0 commands
 
