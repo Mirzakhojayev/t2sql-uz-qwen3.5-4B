@@ -1,4 +1,4 @@
-# t2sql-uz
+# t2sql-uz-qwen3.5-4B
 
 Text-to-SQL for **English, Russian and Uzbek** (Latin and Cyrillic), PostgreSQL first, with a small model that can
 run locally: Qwen3.5-4B plus a LoRA adapter.
