@@ -32,7 +32,8 @@ app = modal.App("t2sql-train")
 vol = modal.Volume.from_name("t2sql-cache", create_if_missing=True)
 CACHE = "/cache"
 MODEL_DIR = f"{CACHE}/models/Qwen3.5-4B"
-GPU_USD_PER_HOUR = {"A100-80GB": 2.50, "H100": 3.95}  # modal.com/pricing, 2026-11-03; both have 80 GB
+# modal.com/pricing, 2026-11-03. A100-40GB is enough for LoRA (the final run peaked at 32.7 GB); price approximate.
+GPU_USD_PER_HOUR = {"A100-80GB": 2.50, "H100": 3.95, "A100-40GB": 2.10}
 MAX_LENGTH = 16384  # decided 2026-10-31
 HOLDOUT_PCT = 2  # of pilot questions, for validation loss only; eval sets never come here
 LOGIT_CHUNK = 2048

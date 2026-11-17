@@ -15,8 +15,8 @@ In Git Bash, prefix commands that pass --model-dir with MSYS_NO_PATHCONV=1: it r
 
 Sampling follows the Qwen3.5 card's "precise coding" settings (temperature 0.6 thinking / 0.7 non-thinking,
 top_p 0.95 / 0.8, top_k 20), except presence_penalty is 0 in both modes: SQL must repeat table and column
-names, which a presence penalty discourages. The function timeout (45 min on an A100 80GB, about $1.9) is the
-cost cap per GPU.
+names, which a presence penalty discourages. The function timeout (60 min; about $2.5 on an A100 80GB, $4 on an
+H100) is the cost cap per GPU.
 """
 import json
 import os
@@ -30,7 +30,7 @@ vol = modal.Volume.from_name("t2sql-cache", create_if_missing=True)
 CACHE = "/cache"
 MODEL_DIR = f"{CACHE}/models/Qwen3.5-4B"
 MAX_MODEL_LEN = 49152  # about 10k prompt + 32k thinking + margin
-FUNCTION_TIMEOUT_S = 2700  # 45 min
+FUNCTION_TIMEOUT_S = 3600  # 60 min: a 45-min cap cut off the larger final-run shards
 GIVE_UP_AFTER_S = FUNCTION_TIMEOUT_S + 900  # image build and queueing on top; past this no GPU can still be working
 
 # The model card asks for vLLM from the nightly index. The CUDA backend must be named explicitly: image builds
@@ -38,14 +38,15 @@ GIVE_UP_AFTER_S = FUNCTION_TIMEOUT_S + 900  # image build and queueing on top; p
 # Modal's GPU driver reports CUDA 13.3, so the cu130 build of vLLM and torch is the matching pair.
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("uv")
+    .pip_install("uv>=0.9")  # Modal's base image ships uv 0.8, which rejects --torch-backend=cu130 (found 2026-11-16)
     .run_commands(
         "uv pip install --system vllm --torch-backend=cu130 --extra-index-url https://wheels.vllm.ai/nightly/cu130"
     )
 )
 
 
-@app.function(image=vllm_image, gpu="A100-80GB", volumes={CACHE: vol}, timeout=FUNCTION_TIMEOUT_S)  # about $1.9 per GPU at most
+# whichever GPU is free first: A100-80GB queues sometimes ran 15+ minutes. Results do not depend on the GPU.
+@app.function(image=vllm_image, gpu=["H100", "A100-80GB"], volumes={CACHE: vol}, timeout=FUNCTION_TIMEOUT_S)
 def generate(records: list[dict], thinking: bool, n: int, max_tokens: int, name: str, shard: int, shards: int,
              model_dir: str = MODEL_DIR) -> str:
     try:
@@ -60,6 +61,7 @@ def generate(records: list[dict], thinking: bool, n: int, max_tokens: int, name:
 
 def _generate(records: list[dict], thinking: bool, n: int, max_tokens: int, name: str, shard: int, shards: int,
               model_dir: str) -> str:
+    import torch
     import vllm
     from vllm import LLM, SamplingParams
 
@@ -102,7 +104,7 @@ def _generate(records: list[dict], thinking: bool, n: int, max_tokens: int, name
 
     out_tokens = sum(o["tokens"] for r in results for o in r["outputs"])
     meta = {
-        "model_dir": model_dir, "vllm": vllm.__version__, "gpu": "A100-80GB", "thinking": thinking, "n": n,
+        "model_dir": model_dir, "vllm": vllm.__version__, "gpu": torch.cuda.get_device_name(0), "thinking": thinking, "n": n,
         "max_tokens": max_tokens, "temperature": params.temperature, "top_p": params.top_p, "top_k": 20,
         "presence_penalty": 0.0, "prompts": len(records), "skipped_too_long": len(records) - len(ok),
         "output_tokens": out_tokens, "load_seconds": round(load_s), "generate_seconds": round(gen_s),
